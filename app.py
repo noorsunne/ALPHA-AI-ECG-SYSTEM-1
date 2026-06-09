@@ -1180,7 +1180,7 @@ def show_patient_dashboard(user):
         st.markdown(f'<div class="dash-stat"><div class="dash-stat-val" style="color:#f59e0b;font-size:20px;">{last_r or "—"}</div><div class="dash-stat-lbl">Last Rhythm</div></div>', unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    tab_ecg_tool, tab_history, tab_profile = st.tabs(["📊  ECG Analysis", "📋  My History", "👤  My Profile"])
+    tab_ecg_tool, tab_history, tab_chat, tab_profile = st.tabs(["📊  ECG Analysis", "📋  My History", "🤖  AI Chatbot", "👤  My Profile"])
 
     with tab_ecg_tool:
         _show_ecg_analysis_ui(user)
@@ -1197,6 +1197,67 @@ def show_patient_dashboard(user):
                         st.caption(f"Analysed by: Dr. {r['doctor_username']}")
         else:
             st.info("No ECG records yet. Upload an ECG in the 'ECG Analysis' tab.")
+
+    with tab_chat:
+        st.markdown("#### 🤖 Alpha AI ECG Assistant")
+        history_key = f"chat_history_patient_{user['username']}"
+        if history_key not in st.session_state:
+            st.session_state[history_key] = []
+
+        st.markdown("""
+        <div style="background:rgba(10,20,40,0.6);border:1px solid rgba(59,130,246,0.2);
+             border-radius:14px;padding:18px 20px;margin-bottom:16px;">
+          <div style="font-size:13px;color:#64748b;line-height:1.6;">
+            🤖 <b style="color:#60a5fa;">Alpha AI ECG Assistant</b> — Powered by Groq LLaMA-3.3-70B<br>
+            Ask me about your ECG results, heart health, or any cardiac questions.
+            <span style="color:#f59e0b;font-size:11px;">⚕️ Not a substitute for professional medical advice.</span>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        client = get_groq_client()
+        if client is None:
+            st.warning("⚠️ Groq API key not configured. Set GROQ_API_KEY in your .env file or use the sidebar override.")
+        else:
+            # Display chat history
+            for msg in st.session_state[history_key]:
+                if msg["role"] == "user":
+                    st.markdown(
+                        f'<div class="chat-msg chat-user">👤 <b>You:</b> {msg["content"]}</div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f'<div class="chat-msg chat-ai">🤖 <b>Alpha AI:</b> {msg["content"]}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+            # Input
+            with st.form(key=f"chat_form_patient_{user['username']}", clear_on_submit=True):
+                col_inp, col_btn = st.columns([5, 1])
+                user_input = col_inp.text_input(
+                    "Ask about your ECG or heart health…",
+                    placeholder="e.g. What does Atrial Fibrillation mean?",
+                    label_visibility="collapsed",
+                )
+                submitted = col_btn.form_submit_button("Send ➤", use_container_width=True)
+
+            if submitted and user_input.strip():
+                with st.spinner("Alpha AI is thinking…"):
+                    try:
+                        ecg_ctx = st.session_state.get("ecg_context", "")
+                        reply = chat_with_groq(client, user_input.strip(),
+                                               st.session_state[history_key], ecg_ctx)
+                        st.session_state[history_key].append({"role": "user", "content": user_input.strip()})
+                        st.session_state[history_key].append({"role": "assistant", "content": reply})
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Groq error: {e}")
+
+            if st.session_state[history_key]:
+                if st.button("🗑️ Clear Chat", key=f"clear_chat_patient_{user['username']}"):
+                    st.session_state[history_key] = []
+                    st.rerun()
 
     with tab_profile:
         st.markdown('<div class="profile-card">', unsafe_allow_html=True)
