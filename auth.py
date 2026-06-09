@@ -1,6 +1,7 @@
 """
-CardioLens AI — Authentication Module
+Alpha AI ECG — Authentication Module
 JWT + SQLite — Admin / Doctor / Patient roles
+New in v2: doctor_feedback table, file_path in ecg_records, update_user_role()
 """
 
 import sqlite3
@@ -41,6 +42,7 @@ def init_db():
             patient_username TEXT,
             doctor_username TEXT,
             filename TEXT,
+            file_path TEXT,
             heart_rate REAL,
             rhythm TEXT,
             rmssd REAL,
@@ -49,13 +51,32 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now'))
         )
     """)
+    # Add file_path column if upgrading from old DB (migration-safe)
+    try:
+        c.execute("ALTER TABLE ecg_records ADD COLUMN file_path TEXT")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists
+
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS doctor_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ecg_record_id INTEGER NOT NULL,
+            doctor_username TEXT NOT NULL,
+            doctor_name TEXT,
+            comment TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (ecg_record_id) REFERENCES ecg_records(id)
+        )
+    """)
+
     # Seed default users if empty
     c.execute("SELECT COUNT(*) FROM users")
     if c.fetchone()[0] == 0:
         seed_users = [
-            ("admin",   hash_password("admin123"),   "admin",   "System Admin",      "admin@cardiolens.ai",   None,          None,        None, None),
-            ("doctor1", hash_password("doctor123"),  "doctor",  "Dr. Ali Hassan",    "ali@cardiolens.ai",     "Cardiologist",None,        None, None),
-            ("doctor2", hash_password("doctor123"),  "doctor",  "Dr. Sara Ahmed",    "sara@cardiolens.ai",    "Cardiologist",None,        None, None),
+            ("admin",   hash_password("admin123"),   "admin",   "System Admin",      "admin@alphaaiecg.ai",   None,          None,        None, None),
+            ("doctor1", hash_password("doctor123"),  "doctor",  "Dr. Ali Hassan",    "ali@alphaaiecg.ai",     "Cardiologist",None,        None, None),
+            ("doctor2", hash_password("doctor123"),  "doctor",  "Dr. Sara Ahmed",    "sara@alphaaiecg.ai",    "Cardiologist",None,        None, None),
             ("patient1",hash_password("patient123"), "patient", "Ahmed Khan",        "ahmed@gmail.com",       None,          "PT-001",    45,   "Male"),
             ("patient2",hash_password("patient123"), "patient", "Fatima Malik",      "fatima@gmail.com",      None,          "PT-002",    32,   "Female"),
         ]
@@ -138,14 +159,16 @@ def get_all_users(role=None):
     conn.close()
     return [dict(r) for r in rows]
 
-def create_user(username, password, role, full_name, email, specialization=None, patient_id=None, age=None, gender=None):
+def create_user(username, password, role, full_name, email,
+                specialization=None, patient_id=None, age=None, gender=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     try:
         c.execute("""
             INSERT INTO users (username,password_hash,role,full_name,email,specialization,patient_id,age,gender)
             VALUES (?,?,?,?,?,?,?,?,?)
-        """, (username, hash_password(password), role, full_name, email, specialization, patient_id, age, gender))
+        """, (username, hash_password(password), role, full_name, email,
+              specialization, patient_id, age, gender))
         conn.commit()
         return True, "User created successfully"
     except sqlite3.IntegrityError:
@@ -160,13 +183,29 @@ def delete_user(username: str):
     conn.commit()
     conn.close()
 
-def save_ecg_record(patient_username, doctor_username, filename, heart_rate, rhythm, rmssd, hr_cv, analysis_json):
+def update_user_role(username: str, new_role: str) -> bool:
+    """Change a user's role (patient ↔ doctor). Admin role cannot be set from here."""
+    if new_role not in ("patient", "doctor"):
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE users SET role=? WHERE username=? AND role != 'admin'", (new_role, username))
+    changed = c.rowcount > 0
+    conn.commit()
+    conn.close()
+    return changed
+
+# ─── ECG RECORDS ─────────────────────────────────────────────────────────────
+def save_ecg_record(patient_username, doctor_username, filename, heart_rate,
+                    rhythm, rmssd, hr_cv, analysis_json, file_path=None):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("""
-        INSERT INTO ecg_records (patient_username,doctor_username,filename,heart_rate,rhythm,rmssd,hr_cv,analysis_json)
-        VALUES (?,?,?,?,?,?,?,?)
-    """, (patient_username, doctor_username, filename, heart_rate, rhythm, rmssd, hr_cv, analysis_json))
+        INSERT INTO ecg_records
+          (patient_username,doctor_username,filename,file_path,heart_rate,rhythm,rmssd,hr_cv,analysis_json)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, (patient_username, doctor_username, filename, file_path,
+          heart_rate, rhythm, rmssd, hr_cv, analysis_json))
     conn.commit()
     conn.close()
 
@@ -184,6 +223,38 @@ def get_ecg_records(username=None, role=None):
     conn.close()
     return [dict(r) for r in rows]
 
+# ─── DOCTOR FEEDBACK ─────────────────────────────────────────────────────────
+def save_feedback(ecg_record_id: int, doctor_username: str, doctor_name: str, comment: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        INSERT INTO doctor_feedback (ecg_record_id, doctor_username, doctor_name, comment)
+        VALUES (?,?,?,?)
+    """, (ecg_record_id, doctor_username, doctor_name, comment))
+    conn.commit()
+    conn.close()
+
+def get_feedback(ecg_record_id: int) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM doctor_feedback WHERE ecg_record_id=? ORDER BY created_at DESC",
+              (ecg_record_id,))
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def get_all_feedback_by_doctor(doctor_username: str) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    c = conn.cursor()
+    c.execute("SELECT * FROM doctor_feedback WHERE doctor_username=? ORDER BY created_at DESC",
+              (doctor_username,))
+    rows = c.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+# ─── STATS ───────────────────────────────────────────────────────────────────
 def get_stats():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -194,6 +265,8 @@ def get_stats():
     stats["patients"] = c.fetchone()[0]
     c.execute("SELECT COUNT(*) FROM ecg_records")
     stats["ecg_total"] = c.fetchone()[0]
+    c.execute("SELECT COUNT(*) FROM doctor_feedback")
+    stats["feedback_total"] = c.fetchone()[0]
     c.execute("SELECT rhythm, COUNT(*) as cnt FROM ecg_records GROUP BY rhythm")
     stats["rhythm_counts"] = dict(c.fetchall())
     conn.close()
